@@ -1,5 +1,7 @@
 # Auto-Fix Agent: The Self-Healing Repository
 
+>Witness the future of software maintenance. The Auto-Fix Agent is an autonomous AI engineer that doesn't just report bugs it fixes them for you. This demo shows the agent acting as a "digital first responder," instantly transforming a vague user bug report into a ready-to-merge GitHub Pull Request. Watch as it autonomously finds the faulty code, debugs it, and patches it automatically, moving us closer to the reality of a self-healing repository.
+
 **Track:** Enterprise Agents
 
 **Built With:** Google Gemini 1.5 Pro, Google AI SDK, PyGithub
