@@ -1,0 +1,255 @@
+# --- SECTION 1: ISTALLING NECCESARY LIBRARIES & CONFIGURATION ------------------------------------
+!pip install -q -U google-generativeai PyGithub termcolor
+print(" Libraries Installed.")
+
+import os
+import base64
+import random
+from github import Github, Auth, GithubException
+from kaggle_secrets import UserSecretsClient
+import google.generativeai as genai
+
+# --- CONFIGURATION -----------------------------------------------------------
+# REPO_NAME: The target GitHub repository (Format: "username/repo")
+# MODEL_NAME: The Gemini model version (optimized for tool use)
+REPO_NAME = "sharmanlazy-coder/kaggle-project" 
+MODEL_NAME = "models/gemini-flash-latest" 
+TARGET_BRANCH = "main"
+
+# --- SECTION 2: SECURITY & AUTHENTICATION ------------------------------------
+
+print("[SYSTEM] Initializing secure environment...")
+user_secrets = UserSecretsClient()
+
+try:
+    # 1. Google AI Authentication
+    GOOGLE_API_KEY = user_secrets.get_secret("Google")
+    genai.configure(api_key=GOOGLE_API_KEY)
+    
+    # 2. GitHub Authentication
+    GITHUB_TOKEN = user_secrets.get_secret("Github")
+    auth = Auth.Token(GITHUB_TOKEN)
+    g = Github(auth=auth)
+    
+    print(f"[SYSTEM] Authentication Successful.")
+    print(f"   - Model: {MODEL_NAME}")
+    print(f"   - User: {g.get_user().login}")
+    
+except Exception as e:
+    print(f"[CRITICAL ERROR] Authentication failed: {e}")
+    print("   - Ensure 'Google' and 'Github' keys are in Add-ons > Secrets.")
+    raise e
+
+# --- SECTION 3: TOOL DEFINITIONS (THE "HANDS") -------------------------------
+
+def get_repo_object():
+    """Helper to retrieve the repository object securely."""
+    return g.get_user().get_repo(REPO_NAME.split("/")[-1])
+
+def search_codebase(query: str):
+    """
+    Searches the repository for files matching the query.
+    Args:
+        query: The keyword to search for (e.g., function name, error message).
+    """
+    try:
+        print(f"[TOOL] Searching codebase for: '{query}'")
+        results = g.search_code(query=f"{query} repo:{REPO_NAME}")
+        
+        matches = []
+        for file in results:
+            matches.append(file.path)
+            if len(matches) >= 3: break 
+            
+        if not matches:
+            return "No matching files found in repository."
+        
+        return f"Found relevant files: {', '.join(matches)}"
+    except Exception as e:
+        return f"Error during search: {str(e)}"
+
+def read_file(file_path: str):
+    """
+    Retrieves the text content of a specific file.
+    Args:
+        file_path: The relative path to the file.
+    """
+    try:
+        print(f"[TOOL] Reading file: '{file_path}'")
+        repo = get_repo_object()
+        file_content = repo.get_contents(file_path, ref=TARGET_BRANCH)
+        return file_content.decoded_content.decode("utf-8")
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
+def create_fix_pull_request(file_path: str, new_code: str, description: str):
+    """
+    Creates a new branch, commits the fix, and opens a Pull Request.
+    Args:
+        file_path: The file to modify.
+        new_code: The complete code content with the fix applied.
+        description: A summary of the changes for the PR description.
+    """
+    try:
+        print(f"[TOOL] Preparing Pull Request for: '{file_path}'")
+        repo = get_repo_object()
+        source_branch = repo.get_branch(TARGET_BRANCH)
+        
+        # Create a unique branch for this fix
+        branch_name = f"auto-fix-{random.randint(1000, 9999)}"
+        repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=source_branch.commit.sha)
+        
+        # Get file SHA for the update
+        file = repo.get_contents(file_path, ref=branch_name)
+        
+        # Commit the change
+        repo.update_file(
+            path=file.path,
+            message="Automated fix application",
+            content=new_code,
+            sha=file.sha,
+            branch=branch_name
+        )
+        
+        # Create the Pull Request
+        pr = repo.create_pull(
+            title="Automated Fix Proposal",
+            body=description,
+            head=branch_name,
+            base=TARGET_BRANCH
+        )
+        return f"SUCCESS: Pull Request created at {pr.html_url}"
+    except Exception as e:
+        return f"Error creating PR: {str(e)}"
+
+# --- SECTION 4: AGENT LOGIC (THE "BRAIN") ------------------------------------
+
+# 1. Register Tools
+tools_list = [search_codebase, read_file, create_fix_pull_request]
+
+# 2. Define Persona
+system_instruction = """
+You are a Senior Backend Engineer.
+Goal: Fix the reported bug by creating a Pull Request.
+
+Process:
+1. SEARCH: Use 'search_codebase' to find the exact file mentioned (e.g., 'calculator.py').
+2. READ: Use 'read_file' to see the code.
+3. FIX: Call 'create_fix_pull_request' with the corrected code.
+
+Rule: If search returns nothing, try a different keyword. Do not give up until you find the file.
+"""
+
+# 3. Initialize Model
+model = genai.GenerativeModel(
+    model_name=MODEL_NAME,
+    tools=tools_list,
+    system_instruction=system_instruction
+)
+
+def run_agent(user_report):
+    """
+    Main execution loop. Handles user input, agent reasoning, and tool execution.
+    Includes retry logic for API rate limits.
+    """
+    print(f"\n[TASK] Processing User Report: '{user_report}'")
+    print("-" * 60)
+    
+    chat = model.start_chat(enable_automatic_function_calling=True)
+    
+    # Retry Logic Configuration
+    max_retries = 3
+    attempt = 0
+    
+    while attempt < max_retries:
+        try:
+            response = chat.send_message(user_report)
+            
+            # Check for valid response content
+            if response.parts:
+                print("\n[REPORT] Agent Output:")
+                print(response.text)
+                return # Success
+            else:
+                print("\n[INFO] Task completed (No text summary returned).")
+                return
+            
+        except exceptions.ResourceExhausted:
+            print(f"[WARN] Rate limit hit (Attempt {attempt+1}/{max_retries}). Pausing for 60s...")
+            time.sleep(60)
+            attempt += 1
+            
+        except ValueError:
+            print("[WARN] Agent returned empty response (likely finished task).")
+            return
+            
+        except Exception as e:
+            print(f"[ERROR] Execution failed: {e}")
+            break
+
+# --- SECTION 5: INTERACTIVE DASHBOARD  -----------------------
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+from datetime import datetime
+
+# 1. Define UI Elements
+header = widgets.HTML("<h2>🐞 Auto-Fix Agent: Mission Control</h2>")
+
+input_area = widgets.Textarea(
+    value="Critical: The application throws a ZeroDivisionError when I use the division feature with 0 as the denominator.",
+    placeholder="Paste user bug report here...",
+    description="<b>Report:</b>",
+    layout=widgets.Layout(width="100%", height="100px")
+)
+
+run_button = widgets.Button(
+    description="🚀 Auto-Fix Bug",
+    button_style="success", # Green button
+    layout=widgets.Layout(width="200px"),
+    icon="wrench"
+)
+
+log_output = widgets.Output(layout=widgets.Layout(border="1px solid #444", height="300px", overflow="scroll"))
+result_area = widgets.HTML()
+
+# 2. Define Button Action
+def on_button_click(b):
+    # Clear previous logs
+    log_output.clear_output()
+    result_area.value = ""
+    run_button.disabled = True
+    run_button.description = "🕵️ Investigating..."
+    
+    bug_report = input_area.value
+    
+    with log_output:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] New Ticket Received.")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Agent Activate! Analyzing report...")
+        
+        # --- RE-USE YOUR EXISTING AGENT FUNCTION ---
+        # We capture the print statements from 'run_agent' automatically
+        try:
+            # Run the agent logic from the previous cell
+            run_agent(bug_report)
+            
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Task Complete.")
+            result_area.value = f"""
+            <div style="background-color: #d4edda; color: #155724; padding: 15px; border-radius: 5px; margin-top: 10px;">
+                <h3> Fix Deployed!</h3>
+                <p>The agent has successfully created a Pull Request.</p>
+                <a href="https://github.com/{REPO_NAME}/pulls" target="_blank" style="font-weight: bold; font-size: 16px;">👉 Click here to review the Fix on GitHub</a>
+            </div>
+            """
+            
+        except Exception as e:
+            print(f" Critical Failure: {e}")
+            result_area.value = f"<div style='color: red;'><b>Error:</b> {e}</div>"
+            
+    run_button.disabled = False
+    run_button.description = "🚀 Auto-Fix Bug"
+
+run_button.on_click(on_button_click)
+
+# 3. Display the Dashboard
+ui = widgets.VBox([header, input_area, run_button, log_output, result_area])
+display(ui)
